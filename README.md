@@ -1,43 +1,87 @@
-# Svelte + Vite
+# ES-1 Sample Manager
 
-This template should help get you started developing with Svelte in Vite.
+A browser-based tool for preparing and managing samples on the **Korg ES-1 rhythm machine**.
 
-## Recommended IDE Setup
+**[▶ Open in browser](https://aircoholic.github.io/es1-sample-manager/)**
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+***
 
-## Need an official Svelte framework?
+## What is this?
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
+The Korg ES-1 is a sampler that stores audio on SmartMedia cards. Each card holds up to 100 samples in slots `00`–`99`, saved as 32kHz 16-bit mono WAV files with specific filenames (`A00BIP.WAV`, `A01BIP.WAV`, etc.).
 
-## Technical considerations
+Preparing samples for the ES-1 usually means:
+- Converting files to the right format (32kHz, 16-bit, mono)
+- Renaming them to match the ES-1's naming scheme
+- Copying them to the card in the right order
+- Keeping track of what's on each card
 
-**Why use this over SvelteKit?**
+This tool handles all of that in the browser — no software to install, no command line.
 
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
+***
 
-This template contains as little as possible to get started with Vite + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
+## Features
 
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
+**Drag & drop**
+Drop any audio file onto the app. WAV, MP3, AIFF, FLAC, OGG and M4A are all supported. Multiple files at once.
 
-**Why include `.vscode/extensions.json`?**
+**Waveform editor**
+Each sample shows an interactive waveform. Drag the start/end markers to trim, or use the arrow keys to nudge to the nearest zero-crossing for clean, click-free cuts.
 
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
+**Per-sample processing**
+Before converting, each sample can have individual options:
+- **Normalize** — boosts the loudest peak to -1 dBFS, so your samples are as loud as possible without clipping
+- **DC Offset** — removes any DC offset that could cause clicks at the start or end of a sample
+- **Hi Boost** — applies a gentle +4dB high shelf from 4kHz upward, useful for samples that sound dull through the ES-1's output stage
+- **Stereo** — keeps the file as stereo (uses 2 sample slots on the ES-1)
 
-**Why enable `checkJs` in the JS template?**
+**Conversion**
+One click converts all queued samples to 32kHz 16-bit WAV, trimmed and processed. FFmpeg runs entirely in the browser — no files leave your computer.
 
-It is likely that most cases of changing variable types in runtime are likely to be accidental, rather than deliberate. This provides advanced typechecking out of the box. Should you like to take advantage of the dynamically-typed nature of JavaScript, it is trivial to change the configuration.
+**Export options**
+- **Save to Card** — writes files directly to a connected SmartMedia card (Chrome/Edge only)
+- **Save to Folder** — saves to any folder on your computer (Chrome/Edge only)
+- **Download as ZIP** — packages all converted samples, works in any browser
 
-**Why is HMR not preserving my local component state?**
+**Print sample list**
+Generates a printable A5 landscape reference sheet for each card: slot numbers, sample names, a notes field, and the date. Save as PDF from the browser's print dialog and keep it with your card archives.
 
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/sveltejs/svelte-hmr/tree/master/packages/svelte-hmr#preservation-of-local-state).
+***
 
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
+## Browser compatibility
 
-```js
-// store.js
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+| Feature | Chrome / Edge | Brave | Firefox / Safari |
+|---|---|---|---|
+| Convert & ZIP download | Yes | Yes | Yes |
+| Save directly to card or folder | Yes | Enable in `brave://flags` | No |
+
+The File System Access API (required for direct card/folder writing) is a Chrome/Edge feature. Firefox and Safari users can use the ZIP download instead.
+
+***
+
+## Run locally
+
+If you prefer to run the tool offline or want to contribute:
+
+```bash
+git clone https://github.com/Aircoholic/es1-sample-manager.git
+cd es1-sample-manager
+npm install
+npm run dev
 ```
+
+Then open [http://localhost:5173/es1-sample-manager/](http://localhost:5173/es1-sample-manager/) in Chrome or Edge.
+
+Node.js 18 or later is required.
+
+***
+
+## About the ES-1
+
+The Korg ES-1 (2000–2003) is a groove sampler/sequencer that records and plays back samples from SmartMedia cards. It samples at 32kHz and supports up to 100 user samples per card. Despite its age, it remains popular for its distinctive lo-fi character, intuitive step sequencer, and the way its 12-bit D/A converter colors the sound.
+
+***
+
+## License
+
+MIT — free to use, modify and distribute. See [LICENSE](LICENSE).
