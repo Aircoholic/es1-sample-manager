@@ -1,0 +1,128 @@
+/* ─────────────────────────────────────────────
+   ES-1 Sample Manager — Design System
+   Art direction: Korg ES-1 mkI hardware
+   Palette: deep anthracite + ES-1 green + LED red
+   Typography: IBM Plex Mono (numbers/labels) + IBM Plex Sans (body)
+   Density: balanced (tool UI)
+───────────────────────────────────────────── */
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+/* ── Tokens ── */
+:root {
+  /* ES-1 Color Palette */
+  --es-green:        #5abf3c;
+  --es-green-bright: #72d94f;
+  --es-green-dim:    #3a7d28;
+  --es-green-glow:   rgba(90, 191, 60, 0.15);
+  --es-green-glow-strong: rgba(90, 191, 60, 0.28);
+
+  --es-red:          #e03c3c;
+  --es-red-bright:   #f55;
+  --es-red-dim:      #8b2020;
+  --es-red-glow:     rgba(224, 60, 60, 0.18);
+
+  /* Surfaces — dark hardware feel */
+  --bg:              #141416;
+  --surface-1:       #1a1a1e;
+  --surface-2:       #1f1f24;
+  --surface-3:       #252529;
+  --surface-4:       #2c2c32;
+  --surface-raised:  #303038;
+
+  /* Borders */
+  --border-subtle:   rgba(255,255,255,0.06);
+  --border-default:  rgba(255,255,255,0.10);
+  --border-strong:   rgba(255,255,255,0.18);
+  --border-green:    rgba(90,191,60,0.35);
+  --border-red:      rgba(224,60,60,0.35);
+
+  /* Text */
+  --text:            #d4d4d8;
+  --text-bright:     #f0f0f2;
+  --text-muted:      #71717a;
+  --text-faint:      #3f3f46;
+  --text-green:      #5abf3c;
+  --text-red:        #e03c3c;
+
+  /* Fonts */
+  --font-body:  'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono:  'IBM Plex Mono', 'Courier New', monospace;
+
+  /* Type scale */
+  --text-xs:   0.72rem;   /* 11.5px */
+  --text-sm:   0.8125rem; /* 13px */
+  --text-base: 0.9375rem; /* 15px */
+  --text-lg:   1.0625rem; /* 17px */
+  --text-xl:   1.25rem;   /* 20px */
+  --text-2xl:  1.5rem;    /* 24px */
+
+  /* Spacing */
+  --sp-1:  0.25rem;
+  --sp-2:  0.5rem;
+  --sp-3:  0.75rem;
+  --sp-4:  1rem;
+  --sp-5:  1.25rem;
+  --sp-6:  1.5rem;
+  --sp-8:  2rem;
+  --sp-10: 2.5rem;
+  --sp-12: 3rem;
+
+  /* Radii */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.5);
+  --shadow-green: 0 0 12px rgba(90,191,60,0.2);
+  --shadow-red:   0 0 10px rgba(224,60,60,0.2);
+
+  /* Transitions */
+  --t-fast:   120ms ease;
+  --t-base:   200ms ease;
+  --t-smooth: 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ── Reset ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  color: var(--text);
+  background: var(--bg);
+  min-height: 100dvh;
+  line-height: 1.55;
+}
+
+img, svg { display: block; max-width: 100%; }
+input, button, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; background: none; border: none; }
+
+:focus-visible {
+  outline: 2px solid var(--es-green);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+::selection {
+  background: var(--es-green-glow-strong);
+  color: var(--text-bright);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
