@@ -3,6 +3,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 
 export default defineConfig({
   plugins: [svelte()],
+  base: '/es1-sample-manager/',
   server: {
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
