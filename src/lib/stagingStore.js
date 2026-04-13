@@ -1,34 +1,42 @@
 import { writable } from 'svelte/store';
 
-export const stagingSlots = writable([]);
+/** @typedef {{ status: 'pending'|'converting'|'done'|'error' }} StagingSlot */
+
+export const stagingSlots = writable(/** @type {StagingSlot[]} */ ([]));
 
 export function addToStaging(file) {
-  stagingSlots.update(slots => [...slots, {
-    id: crypto.randomUUID(),
+  stagingSlots.update(s => [...s, {
+    id:            crypto.randomUUID(),
     file,
-    name: file.name.replace(/\.[^.]+$/, ''),
-    normalize: false,
-    dcOffset: false,
+    name:          file.name.replace(/\.[^.]+$/, ''),
+    normalize:     false,
+    dcOffset:      false,
     highpassBoost: false,
-    stereo: false,
-    trimStart: 0,    // in Sekunden
-    trimEnd: null,   // null = bis zum Ende
-    duration: null,  // wird nach AudioContext-Analyse gesetzt
-    waveformData: null, // Float32Array für die Anzeige
-    status: 'pending', // pending | converting | done | error
+    stereo:        false,
+    trimStart:     0,
+    trimEnd:       null,     // null = full length
+    duration:      null,     // set after analysis
+    waveformData:  null,     // Float32Array peaks
+    rawSamples:    null,     // full Float32Array for zero-crossing
+    sampleRate:    null,
+    status:        'pending',
   }]);
 }
 
 export function updateStagingSlot(id, changes) {
-  stagingSlots.update(slots =>
-    slots.map(s => s.id === id ? { ...s, ...changes } : s)
+  stagingSlots.update(s =>
+    s.map(slot => slot.id === id ? { ...slot, ...changes } : slot)
   );
 }
 
 export function removeStagingSlot(id) {
-  stagingSlots.update(slots => slots.filter(s => s.id !== id));
+  stagingSlots.update(s => s.filter(slot => slot.id !== id));
 }
 
 export function clearStaging() {
   stagingSlots.set([]);
+}
+
+export function clearDoneSlots() {
+  stagingSlots.update(s => s.filter(slot => slot.status !== 'done'));
 }

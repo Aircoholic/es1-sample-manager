@@ -1,114 +1,190 @@
 <script>
-  import { slots, removeSlot, updateLabel, reorderSlots } from '../lib/slotStore.js';
+  import { slots, removeSlot, updateLabel, reorderSlots, clearSlots } from '../lib/slotStore.js';
+
   let dragFrom = null;
 </script>
 
-{#if $slots.length === 0}
-  <p class="empty">No samples loaded yet.</p>
-{:else}
-  <ul>
-    {#each $slots as slot, i}
-      <li
-        draggable="true"
-        ondragstart={() => dragFrom = i}
-        ondragover={(e) => e.preventDefault()}
-        ondrop={() => { reorderSlots(dragFrom, i); dragFrom = null; }}
-        class:dragging={dragFrom === i}
-      >
-        <span class="index">{String(i).padStart(2, '0')}</span>
-        <input
-          type="text"
-          value={slot.label}
-          oninput={(e) => updateLabel(i, e.target.value)}
-          placeholder="Sample name…"
-        />
-        <audio controls src={slot.audioUrl}></audio>
-        <button class="remove" onclick={() => removeSlot(i)}>✕</button>
-      </li>
-    {/each}
-  </ul>
-{/if}
+<section class="slot-section" aria-label="Sample slots">
+
+  <div class="slot-header">
+    <span class="section-label">SLOTS</span>
+    {#if $slots.length > 0}
+      <span class="slot-count">{$slots.length} / 100</span>
+      <button class="btn-ghost" onclick={clearSlots}>Clear all</button>
+    {/if}
+  </div>
+
+  {#if $slots.length === 0}
+    <p class="empty-state">No samples loaded yet.</p>
+  {:else}
+    <ul class="slot-list" aria-label="Sample slot list">
+      {#each $slots as slot, i}
+        <li
+          class="slot-row"
+          class:drag-active={dragFrom === i}
+          draggable="true"
+          ondragstart={() => dragFrom = i}
+          ondragover={(e) => e.preventDefault()}
+          ondrop={() => { if (dragFrom !== null) { reorderSlots(dragFrom, i); dragFrom = null; } }}
+          ondragend={() => dragFrom = null}
+          aria-label={`Slot ${String(i).padStart(2,'0')}: ${slot.label || 'unnamed'}`}
+        >
+          <span class="drag-handle" aria-hidden="true">
+            <svg width="8" height="12" viewBox="0 0 8 12" fill="currentColor">
+              <circle cx="2" cy="2"  r="1.2"/>
+              <circle cx="6" cy="2"  r="1.2"/>
+              <circle cx="2" cy="6"  r="1.2"/>
+              <circle cx="6" cy="6"  r="1.2"/>
+              <circle cx="2" cy="10" r="1.2"/>
+              <circle cx="6" cy="10" r="1.2"/>
+            </svg>
+          </span>
+
+          <span class="slot-index">{String(i).padStart(2, '0')}</span>
+
+          <input
+            type="text"
+            class="label-input"
+            value={slot.label}
+            oninput={(e) => updateLabel(i, e.target.value)}
+            placeholder="Sample name"
+            aria-label="Sample name for slot {i}"
+          />
+
+          <audio
+            class="slot-audio"
+            controls
+            src={slot.audioUrl}
+            preload="none"
+            aria-label="Preview slot {i}"
+          ></audio>
+
+          <button
+            class="remove-btn"
+            onclick={() => removeSlot(i)}
+            aria-label="Remove slot {i}"
+            title="Remove"
+          >
+            <svg width="10" height="10" viewBox="0 0 14 14" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="1" y1="1" x2="13" y2="13"/>
+              <line x1="13" y1="1" x2="1" y2="13"/>
+            </svg>
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</section>
 
 <style>
-  .empty {
-    font-size: var(--text-sm);
-    color: var(--text-faint);
-    text-align: center;
-    padding: var(--sp-8) 0;
-    font-family: var(--font-mono);
+  .slot-section {
+    margin-top: var(--sp8);
   }
 
-  ul {
-    list-style: none;
+  .slot-header {
     display: flex;
-    flex-direction: column;
-    gap: var(--sp-2);
-  }
-
-  li {
-    display: grid;
-    grid-template-columns: 32px 1fr auto auto;
     align-items: center;
-    gap: var(--sp-2);
-    padding: var(--sp-2) var(--sp-3);
-    background: var(--surface-2);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--r-md);
-    transition: border-color var(--t-fast), background var(--t-fast);
-    cursor: grab;
+    gap: var(--sp3);
+    margin-bottom: var(--sp3);
   }
 
-  li:hover { border-color: var(--border-default); }
-  li.dragging { opacity: 0.4; border-color: var(--es-green-dim); background: var(--surface-3); }
+  .slot-count {
+    font-family: var(--mono);
+    font-size: var(--tx);
+    color: var(--tf);
+    margin-left: auto;
+  }
 
-  .index {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--text-faint);
+  .btn-ghost {
+    font-family: var(--mono);
+    font-size: var(--tx);
+    color: var(--tf);
+    border: 1px solid var(--b0);
+    border-radius: var(--r2);
+    padding: 3px var(--sp3);
+    background: transparent;
+    transition: color var(--tf2), border-color var(--tf2), background var(--tf2);
+  }
+  .btn-ghost:hover {
+    color: var(--t);
+    border-color: var(--b1);
+    background: var(--s3);
+  }
+
+  .empty-state {
+    font-family: var(--mono);
+    font-size: var(--ts);
+    color: var(--tf);
     text-align: center;
+    padding: var(--sp8) 0;
     letter-spacing: 0.04em;
   }
 
-  input[type="text"] {
+  .slot-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .slot-row {
+    display: grid;
+    grid-template-columns: 14px 28px 1fr auto auto;
+    align-items: center;
+    gap: var(--sp2);
+    padding: 5px var(--sp3);
+    background: var(--s2);
+    border: 1px solid var(--b0);
+    border-radius: var(--r2);
+    cursor: grab;
+    transition: border-color var(--tf2), background var(--tf2), opacity var(--tf2);
+  }
+  .slot-row:hover       { border-color: var(--b1); }
+  .slot-row.drag-active { opacity: 0.35; border-color: var(--green-dim); }
+
+  .drag-handle {
+    color: var(--tf);
+    opacity: 0.5;
+    cursor: grab;
+  }
+
+  .slot-index {
+    font-family: var(--mono);
+    font-size: var(--tx);
+    font-weight: 600;
+    color: var(--tf);
+    text-align: center;
+    letter-spacing: 0.06em;
+  }
+
+  .label-input {
     background: transparent;
     border: none;
-    border-radius: var(--r-sm);
-    padding: 3px var(--sp-2);
-    font-size: var(--text-sm);
-    color: var(--text-bright);
+    border-radius: var(--r1);
+    padding: 3px var(--sp2);
+    font-size: var(--ts);
+    color: var(--tb);
     width: 100%;
-    transition: background var(--t-fast);
+    transition: background var(--tf2);
+  }
+  .label-input::placeholder { color: var(--tf); }
+  .label-input:focus { outline: none; background: var(--s1); }
+
+  .slot-audio {
+    height: 26px;
+    min-width: 130px;
+    accent-color: var(--green);
+    border-radius: var(--r1);
+    background: var(--s1);
   }
 
-  input[type="text"]::placeholder { color: var(--text-faint); }
-  input[type="text"]:focus {
-    outline: none;
-    background: var(--surface-1);
+  .remove-btn {
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--tf);
+    border-radius: var(--r1);
+    transition: color var(--tf2), background var(--tf2);
   }
-
-  audio {
-    height: 28px;
-    min-width: 140px;
-    accent-color: var(--es-green);
-    border-radius: var(--r-sm);
-    background: var(--surface-1);
-  }
-
-  .remove {
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 11px;
-    color: var(--text-faint);
-    border-radius: var(--r-sm);
-    transition: color var(--t-fast), background var(--t-fast);
-  }
-
-  .remove:hover {
-    color: var(--es-red);
-    background: var(--es-red-glow);
-  }
+  .remove-btn:hover { color: var(--tr); background: rgba(217,64,64,0.1); }
 </style>
