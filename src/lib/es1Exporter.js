@@ -1,54 +1,37 @@
 /**
  * es1Exporter.js — Connects slot store to the ES-1 ADPCM encoder.
  *
- * Bugs fixed vs previous version:
+ * KEY BUG FIX: Previous versions called OfflineAudioContext.close() before
+ * rendering, which throws in Chrome/Brave and silently aborts all encoding.
+ * This version uses a plain AudioContext and never calls close().
  *
- *   BUG 1 (no audio written): OfflineAudioContext.close() threw in Chrome/Brave
- *   before any audio buffer was decoded, silently skipping all samples.
- *   Fix: use a plain AudioContext for decodeAudioData — never call close() on it.
- *
- *   BUG 2 (garbage patterns on device): createEmptyES1 filled with 0xFF.
- *   The ES-1 reads 0xFF parameter bytes as maximum values → BPM=511, all FX on.
- *   Fix: createEmptyES1 now fills with 0x00 (off/minimum). Fixed in es1Encoder.js.
- *
- *   BUG 3 (silent truncation): No warning when total audio exceeds the ~98 s limit.
- *   Fix: capacity check before encoding, warning passed to UI via onProgress.
+ * Debug logging is included (visible in browser DevTools console).
  */
 
 import { get }   from 'svelte/store';
 import { slots } from './slotStore.js';
-import {
-  createEmptyES1, writeSlot, downloadES1,
-  ES1_SR, FRAMESIZE, RAM_START,
-} from './es1Encoder.js';
+import { createEmptyES1, writeSlot, downloadES1, ES1_SR, FRAMESIZE, RAM_START } from './es1Encoder.js';
 
-const AUDIO_ZONE_BYTES = 0x3A0000 - 0x0A0000;   // 3 145 728
+const AUDIO_ZONE = 0x3A0000 - 0x0A0000;  // 3 145 728 bytes ≈ 98 s
 
 // ─── DECODE ───────────────────────────────────────────────────────────────────
 
-/**
- * Decode a WAV Blob → mono Float32Array at ES1_SR.
- *
- * IMPORTANT: uses a plain AudioContext, NOT OfflineAudioContext.
- * Calling close() on an OfflineAudioContext that hasn't been rendered yet
- * throws in Chrome/Brave, silently aborting the entire export with no audio.
- * A plain AudioContext.decodeAudioData() is safe, async, and GC'd naturally.
- */
 async function blobToFloat32(blob) {
-  const buf = await blob.arrayBuffer();
+  const arrayBuffer = await blob.arrayBuffer();
 
-  // Plain AudioContext is safe in all browsers — do NOT call .close() after
-  const ctx = new AudioContext();
-  const decoded = await ctx.decodeAudioData(buf);
-  // Note: intentionally not calling ctx.close() here
+  // Use a plain AudioContext — NOT OfflineAudioContext.
+  // Calling close() on an OfflineAudioContext before startRendering() throws
+  // in Chrome/Brave, silently aborting the entire export.
+  const ctx     = new AudioContext();   // do NOT call ctx.close()
+  const decoded = await ctx.decodeAudioData(arrayBuffer);
 
-  // Already at target rate — return directly
   if (Math.abs(decoded.sampleRate - ES1_SR) < 1) {
+    console.log(`[ES1] Decoded: ${decoded.length} samples @ ${decoded.sampleRate} Hz`);
     return decoded.getChannelData(0);
   }
 
-  // Resample to 32 kHz. Here we DO render so close() would be fine, but we
-  // skip it anyway for consistency.
+  // Resample if source isn't already 32 kHz
+  console.log(`[ES1] Resampling from ${decoded.sampleRate} Hz → ${ES1_SR} Hz`);
   const outLen  = Math.round(decoded.duration * ES1_SR);
   const resCtx  = new OfflineAudioContext(1, outLen, ES1_SR);
   const src     = resCtx.createBufferSource();
@@ -59,51 +42,35 @@ async function blobToFloat32(blob) {
   return resampled.getChannelData(0);
 }
 
-// ─── CAPACITY PRE-CHECK ───────────────────────────────────────────────────────
+// ─── EXPORT ───────────────────────────────────────────────────────────────────
 
-/**
- * Quickly estimate total encoded bytes from WAV blob headers only.
- * Avoids decoding all audio just to check capacity.
- */
-async function estimateBytes(activeSlots) {
-  let total = 0;
-  for (const { blob } of activeSlots) {
-    try {
-      const hdr  = await blob.slice(0, 44).arrayBuffer();
-      const view = new DataView(hdr);
-      const sr   = view.getUint32(24, true);
-      const data = view.getUint32(40, true);
-      const ba   = view.getUint16(32, true);
-      const n    = Math.round((data / ba) * ES1_SR / sr);
-      total += Math.ceil(n / FRAMESIZE) * FRAMESIZE;
-    } catch {
-      total += ES1_SR;   // fallback: assume 1 s
-    }
-  }
-  return total;
-}
-
-// ─── MAIN EXPORT ──────────────────────────────────────────────────────────────
-
-/**
- * Build and download a .ES1 backup from all converted slots.
- *
- * @param {(p:{phase:string,slot:number,total:number,pct:number,warning?:string})=>void} [onProgress]
- */
 export async function exportAndDownloadES1(onProgress) {
   const active = get(slots).filter(s => s?.blob instanceof Blob);
+  console.log(`[ES1] Export start: ${active.length} slot(s) with blobs`);
 
   if (!active.length)
     throw new Error('No converted samples found. Convert at least one sample first.');
 
-  // Capacity check
-  const needed = await estimateBytes(active);
-  let warning  = null;
-  if (needed > AUDIO_ZONE_BYTES) {
-    const maxS  = (AUDIO_ZONE_BYTES / ES1_SR).toFixed(0);
-    const needS = (needed          / ES1_SR).toFixed(0);
+  // Capacity estimate (non-blocking, best-effort)
+  let warning = null;
+  let estimated = 0;
+  for (const { blob } of active) {
+    try {
+      const hdr  = await blob.slice(0, 44).arrayBuffer();
+      const view = new DataView(hdr);
+      const sr   = view.getUint32(24, true) || ES1_SR;
+      const data = view.getUint32(40, true);
+      const ba   = view.getUint16(32, true) || 2;
+      const n    = Math.round((data / ba) * ES1_SR / sr);
+      estimated += Math.ceil(n / FRAMESIZE) * FRAMESIZE;
+    } catch { estimated += ES1_SR; }
+  }
+  if (estimated > AUDIO_ZONE) {
+    const maxS  = Math.round(AUDIO_ZONE / ES1_SR);
+    const needS = Math.round(estimated  / ES1_SR);
     warning = `Total audio (~${needS} s) exceeds the ES-1 limit of ~${maxS} s. ` +
-              `Later slots will be skipped. Trim samples or use fewer slots.`;
+              `Later slots will be skipped. Trim long samples or use fewer slots.`;
+    console.warn('[ES1]', warning);
   }
   onProgress?.({ phase:'check', slot:0, total:active.length, pct:0, warning });
 
@@ -116,31 +83,43 @@ export async function exportAndDownloadES1(onProgress) {
     const { blob, label } = active[i];
     onProgress?.({ phase:'decode', slot:i+1, total, pct: Math.round((i/total)*50), warning });
 
+    console.log(`[ES1] Slot ${i}: decoding "${label}" (${blob.size} bytes)`);
+
     let f32;
     try {
       f32 = await blobToFloat32(blob);
+      console.log(`[ES1] Slot ${i}: decoded ${f32.length} float32 samples`);
     } catch (err) {
-      console.warn(`ES1 export: slot ${i} (${label}) decode failed — skipped.`, err);
+      console.error(`[ES1] Slot ${i} decode error:`, err);
+      continue;
+    }
+
+    if (!f32 || f32.length === 0) {
+      console.warn(`[ES1] Slot ${i}: empty float32 array, skipping`);
       continue;
     }
 
     try {
+      const prevAddr = ramAddr;
       ramAddr = writeSlot(es1, written, f32, ramAddr, (done, frames) => {
         const fp = frames > 0 ? done/frames : 1;
         onProgress?.({ phase:'encode', slot:i+1, total, pct: Math.round(50+((i+fp)/total)*45), warning });
       });
+      console.log(`[ES1] Slot ${written}: wrote ${f32.length} samples, addr 0x${prevAddr.toString(16)}→0x${ramAddr.toString(16)}`);
       written++;
     } catch (err) {
       if (err.message?.includes('audio zone full')) {
-        console.warn(`ES1 export: audio zone full after ${written} slots.`);
+        console.warn(`[ES1] Audio zone full after ${written} slots`);
         break;
       }
-      console.warn(`ES1 export: slot ${i} (${label}) encode failed — skipped.`, err);
+      console.error(`[ES1] Slot ${i} encode error:`, err);
     }
   }
 
+  console.log(`[ES1] Export complete: ${written} slot(s) written`);
+
   if (written === 0)
-    throw new Error('Export failed: no samples encoded. See browser console for details.');
+    throw new Error('Export failed: no samples could be encoded. Check the browser console (F12) for details.');
 
   onProgress?.({ phase:'download', slot:total, total, pct:99, warning });
   downloadES1(es1, 'BACKUP.ES1');

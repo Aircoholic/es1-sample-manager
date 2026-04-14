@@ -218,17 +218,17 @@
     font-size: var(--ts);
     font-weight: 600;
     letter-spacing: 0.04em;
-    background: var(--green);
+    background: #3ddc5c;
     color: #091407;
-    border: 1px solid var(--green);
+    border: 1px solid #3ddc5c;
     border-radius: var(--r2);
-    box-shadow: 0 2px 8px rgba(90,191,60,0.22);
+    
     transition: background var(--tf2), border-color var(--tf2), box-shadow var(--tf2), transform var(--tf2);
   }
   .btn-convert:hover:not(:disabled) {
-    background: var(--green-bright);
-    border-color: var(--green-bright);
-    box-shadow: 0 4px 14px rgba(90,191,60,0.32);
+    background: #52e870;
+    border-color: #52e870;
+    
     transform: translateY(-1px);
   }
   .btn-convert:active:not(:disabled) { transform: translateY(0); }
