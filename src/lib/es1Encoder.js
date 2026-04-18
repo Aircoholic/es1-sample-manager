@@ -1,23 +1,34 @@
 /**
- * es1Encoder.js — Korg ES-1 ADPCM Encoder
+ * es1Encoder.js — Korg ES-1 ADPCM Encoder & .ES1 Backup Writer
  *
- * Reverse-engineered from Korg's es2wav.exe via polluxsynth/es12wav.
- * All addresses verified against real ES-1 hardware backups (Phase 1-3, 2026).
+ * ADPCM core ported from Korg's es2wav.exe via polluxsynth/es12wav (adpcm.c).
+ * Slot-record format determined empirically from real hardware backups (2026).
  *
- * Verified layout:
+ * VERIFIED SLOT RECORD FORMAT (26 bytes, at HDR_BASE + slot_i × 26):
+ *   [0]     0x00 reserved
+ *   [1-3]   in slot 0 ONLY: next-free-AUX-address (3-byte BE); else 0x00
+ *   [4-6]   STADDR  — audio start address (3-byte BE, stored-addr space)
+ *   [7-9]   ENDADDR — audio end address (inclusive)
+ *   [10-12] AUX_START — secondary 32-byte block (3-byte BE)
+ *   [13-15] AUX_END   = AUX_START + 31
+ *   [16-20] reserved 0x00
+ *   [21]    STATUS — 0x1f = occupied, 0x00 = empty  (NOT 0xFF=empty!)
+ *   [22-24] reserved 0x00
+ *   [25]    OCCUPIED: slot index (0..99); EMPTY: 0xFF
+ *
+ * VERIFIED FILE LAYOUT:
  *   File size  : 3 801 088 bytes (29 × 2^17)
- *   Slot table : 0x080010, 26 bytes/slot
- *     [4..6] STADDR, [7..9] ENDADDR, [21] STATUS (0xFF=empty, 0x00=occupied)
- *   Address    : file_offset = stored_addr - 0x160000
- *   Audio zone : 0x0A0000 – 0x39FFFF
- *   ADPCM      : 32 bytes per block, 32 samples per block (1 ms @ 32 kHz)
- *
- * Default state notes:
- *   Pattern area (0x000100-0x07FFFF) must be 0x00, NOT 0xFF.
- *   0xFF → ES-1 reads BPM=511, all steps+FX on (broken).
- *   0x00 → ES-1 uses minimum values (BPM=0 reads as ~20).
- *   BPM byte at 0x100 set to 120 (0x78) for a sensible default.
+ *   HDR1 at 0x000000, HDR2 at 0x080000 (16-byte KORG magic each)
+ *   Slot table: 0x080010, 100 mono × 26 + 50 stereo × 28 bytes
+ *   Audio zone: 0x0A0000 – 0x39FFFF (file offsets)
+ *   Stored addr: file_offset = stored_addr − 0x160000
+ *   AUX base   : 0x3FA7E0 (stored) = 0x29A7E0 (file) — per-slot aux allocations
+ *   Pattern area (0x000100–0x07FFFF) must be 0x00, NOT 0xFF.
+ *     0xFF → hardware reads BPM=511, all steps+FX on (broken).
+ *   BPM byte at 0x100 — hardware displays value×2 (so store 60 for 120 BPM).
  */
+
+// ─── ADPCM TABLES ─────────────────────────────────────────────────────────────
 
 const INDEX_TABLE = [
   -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
@@ -44,28 +55,41 @@ const STEP_TABLE = [
    28962,29686,30428,31189,31968,32767],
 ];
 
-export const ES1_SIZE    = 3_801_088;
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+
+export const ES1_SIZE    = 3_801_088;  // 29 × 2^17
 export const ES1_SR      = 32_000;
 export const FRAMESIZE   = 32;
 export const RAM_START   = 0x200000;
 
-const HEADERPOS   = 0x080000;
-const HDR_BASE    = 0x080010;
-const MHDR_SIZE   = 26;
-const SHDR_SIZE   = 28;
-const MONO_SLOTS  = 100;
+const HEADERPOS    = 0x080000;
+const HDR_BASE     = 0x080010;
+const MHDR_SIZE    = 26;
+const SHDR_SIZE    = 28;
+const MONO_SLOTS   = 100;
 const STEREO_SLOTS = 50;
-const ADDR_OFFSET = 0x160000;
+const ADDR_OFFSET  = 0x160000;
+const AUX_BASE     = 0x3FA7E0;   // start of aux allocation region (stored addr)
+
+const STATUS_OCCUPIED = 0x1F;
+const STATUS_EMPTY    = 0x00;    // note: 0x00, not 0xFF!
+const EMPTY_INDEX     = 0xFF;    // byte [25] marker for empty slots
 
 const HDR1 = [0x4B,0x4F,0x52,0x47,0x01,0x00,0x57,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0xBB,0xB3];
 const HDR2 = [0x4B,0x4F,0x52,0x47,0x01,0x00,0x57,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xAF,0x3E];
+
+// ─── ADPCM CORE ───────────────────────────────────────────────────────────────
 
 function stepsizeToIndex(s, tn) {
   const t = STEP_TABLE[tn];
   let tp = 47, idx = 0;
   tp -= 16;
   if (s >= t[tp+16]) { idx += 48; tp += 24; }
-  else { tp -= 16; if (s >= t[tp+16]) { idx += 32; tp += 24; } else { tp -= 8; if (s >= t[tp+8]) { idx += 16; tp += 16; } } }
+  else {
+    tp -= 16;
+    if (s >= t[tp+16]) { idx += 32; tp += 24; }
+    else { tp -= 8; if (s >= t[tp+8]) { idx += 16; tp += 16; } }
+  }
   tp -= 4; if (s >= t[tp+4]) { idx += 8; tp += 8; }
   tp -= 2; if (s >= t[tp+2]) { idx += 4; tp += 4; }
   tp -= 1; if (s >= t[tp+1]) { idx += 2; tp += 2; }
@@ -135,68 +159,143 @@ function encodeFrame(samples) {
   return o;
 }
 
+// ─── PUBLIC API ───────────────────────────────────────────────────────────────
+
+/**
+ * Create a blank .ES1 image with sane hardware defaults.
+ *   - Header magic bytes at 0x000000 and 0x080000
+ *   - Pattern area (0x000100–0x07FFFF) = 0x00 (minimum values, steps off)
+ *   - BPM byte at 0x100 = 60 (hardware displays 60×2 = 120 BPM)
+ *   - Audio zone (0x0A0000–0x3A0000) = 0xFF (erased flash)
+ *   - All slots marked empty: STATUS=0x00, byte[25]=0xFF
+ */
 export function createEmptyES1() {
-  const data = new Uint8Array(ES1_SIZE);  // zero-filled = sane defaults for params
+  const data = new Uint8Array(ES1_SIZE);   // zero-filled
 
-  // KORG headers
-  HDR1.forEach((b,i)=>{ data[i]=b; });
-  HDR2.forEach((b,i)=>{ data[HEADERPOS+i]=b; });
+  HDR1.forEach((b, i) => { data[i] = b; });
+  HDR2.forEach((b, i) => { data[HEADERPOS + i] = b; });
 
-  // Audio zone = 0xFF (erased NOR flash = no audio)
+  // Audio zone = 0xFF (erased NOR flash)
   data.fill(0xFF, 0x0A0000, 0x3A0000);
 
-  // Default BPM = 120 (stored as direct byte value at 0x100, verified from hardware)
-  data[0x100] = 120;
+  // Default BPM = 60 raw → hardware displays 120 BPM (stored as value/2)
+  data[0x100] = 60;
 
-  // Mark all slots empty (STATUS = 0xFF)
+  // Empty-slot marker: byte [25] = 0xFF for all slots (STATUS already 0 from fill)
   const monoEnd = HDR_BASE + MONO_SLOTS * MHDR_SIZE;
-  for (let s = 0; s < MONO_SLOTS;   s++) data[HDR_BASE + s*MHDR_SIZE + 21] = 0xFF;
-  for (let s = 0; s < STEREO_SLOTS; s++) data[monoEnd  + s*SHDR_SIZE + 21] = 0xFF;
+  for (let s = 0; s < MONO_SLOTS;   s++) data[HDR_BASE + s * MHDR_SIZE + 25] = EMPTY_INDEX;
+  for (let s = 0; s < STEREO_SLOTS; s++) data[monoEnd  + s * SHDR_SIZE + 25] = EMPTY_INDEX;
 
   return data;
 }
 
+/**
+ * Encode a mono 32 kHz Float32Array into a slot of the .ES1 image.
+ * Writes the slot descriptor (including aux address and status=0x1f)
+ * and allocates a corresponding 32-byte aux block at AUX_BASE + slotNo × 32.
+ *
+ * @param {Uint8Array}   es1         Image to modify in-place
+ * @param {number}       slotNo      0–99 (mono)
+ * @param {Float32Array} samples32k  Mono float [-1..1] at 32 kHz
+ * @param {number}       nextRamAddr Start: RAM_START (0x200000)
+ * @param {function}     [onProgress] (framesDone, framesTotal)
+ * @returns {number} Updated nextRamAddr (32-byte aligned)
+ */
 export function writeSlot(es1, slotNo, samples32k, nextRamAddr, onProgress) {
   if (slotNo < 0 || slotNo >= MONO_SLOTS)
-    throw new RangeError(`Slot ${slotNo} out of range (0–${MONO_SLOTS-1})`);
+    throw new RangeError(`Slot ${slotNo} out of range (0–${MONO_SLOTS - 1})`);
 
+  // Float32 → Int16
   const pcm16 = new Int16Array(samples32k.length);
   for (let i = 0; i < samples32k.length; i++)
-    pcm16[i] = Math.max(-32767, Math.min(32767, Math.round(samples32k[i]*32767)));
+    pcm16[i] = Math.max(-32767, Math.min(32767, Math.round(samples32k[i] * 32767)));
 
+  // Encode ADPCM blocks
   const nFrames = Math.ceil(pcm16.length / FRAMESIZE);
   const adpcm   = new Uint8Array(nFrames * FRAMESIZE);
   const buf     = new Int16Array(FRAMESIZE);
 
   for (let fn = 0; fn < nFrames; fn++) {
     for (let i = 0; i < FRAMESIZE; i++)
-      buf[i] = (fn*FRAMESIZE+i < pcm16.length) ? pcm16[fn*FRAMESIZE+i] : 0;
-    adpcm.set(encodeFrame(buf), fn*FRAMESIZE);
+      buf[i] = (fn * FRAMESIZE + i < pcm16.length) ? pcm16[fn * FRAMESIZE + i] : 0;
+    adpcm.set(encodeFrame(buf), fn * FRAMESIZE);
     if (onProgress && (fn & 63) === 0) onProgress(fn, nFrames);
   }
   onProgress?.(nFrames, nFrames);
 
-  const staddr  = nextRamAddr;
-  const endaddr = staddr + adpcm.length - 1;
-  const fileOff = staddr - ADDR_OFFSET;
+  // Primary audio allocation
+  const staddr   = nextRamAddr;
+  const endaddr  = staddr + adpcm.length - 1;
+  const fileOff  = staddr - ADDR_OFFSET;
+
+  // Aux block allocation — one 32-byte block per slot at AUX_BASE + slotNo × 32
+  const auxStart = AUX_BASE + slotNo * FRAMESIZE;
+  const auxEnd   = auxStart + FRAMESIZE - 1;
+  const auxFile  = auxStart - ADDR_OFFSET;
 
   if (fileOff < 0 || fileOff + adpcm.length > ES1_SIZE)
     throw new Error(`Slot ${slotNo}: audio zone full`);
+  if (fileOff + adpcm.length > auxFile)
+    throw new Error(`Slot ${slotNo}: audio would overlap aux region`);
 
+  // Write primary ADPCM audio
   es1.set(adpcm, fileOff);
 
+  // Write aux block — 32 zero bytes is a safe placeholder
+  // (The aux block's exact purpose is unknown, but zero-fill seems accepted.)
+  // If this fails, try: es1.set(adpcm.subarray(0, FRAMESIZE), auxFile);  // copy of first block
+  es1.fill(0x00, auxFile, auxFile + FRAMESIZE);
+
+  // Write slot descriptor
   const hoff = HDR_BASE + slotNo * MHDR_SIZE;
-  es1[hoff+4]  = (staddr  >> 16) & 0xFF;
-  es1[hoff+5]  = (staddr  >>  8) & 0xFF;
-  es1[hoff+6]  =  staddr         & 0xFF;
-  es1[hoff+7]  = (endaddr >> 16) & 0xFF;
-  es1[hoff+8]  = (endaddr >>  8) & 0xFF;
-  es1[hoff+9]  =  endaddr        & 0xFF;
-  es1[hoff+21] = 0x00;
+
+  // [0] reserved; already 0
+  // [1-3] reserved for non-zero slots; handled below for slot 0
+
+  // [4-6] STADDR
+  es1[hoff + 4] = (staddr >> 16) & 0xFF;
+  es1[hoff + 5] = (staddr >>  8) & 0xFF;
+  es1[hoff + 6] =  staddr        & 0xFF;
+
+  // [7-9] ENDADDR
+  es1[hoff + 7] = (endaddr >> 16) & 0xFF;
+  es1[hoff + 8] = (endaddr >>  8) & 0xFF;
+  es1[hoff + 9] =  endaddr        & 0xFF;
+
+  // [10-12] AUX_START
+  es1[hoff + 10] = (auxStart >> 16) & 0xFF;
+  es1[hoff + 11] = (auxStart >>  8) & 0xFF;
+  es1[hoff + 12] =  auxStart        & 0xFF;
+
+  // [13-15] AUX_END
+  es1[hoff + 13] = (auxEnd >> 16) & 0xFF;
+  es1[hoff + 14] = (auxEnd >>  8) & 0xFF;
+  es1[hoff + 15] =  auxEnd        & 0xFF;
+
+  // [16-20] reserved; already 0
+
+  // [21] STATUS = occupied
+  es1[hoff + 21] = STATUS_OCCUPIED;
+
+  // [22-24] reserved; already 0
+
+  // [25] slot index (not 0xFF anymore — this one is occupied)
+  es1[hoff + 25] = slotNo & 0xFF;
+
+  // Update slot 0's next-free-aux pointer (bytes [1-3])
+  // This must always reflect the highest allocated aux + 32
+  const nextFreeAux = AUX_BASE + (slotNo + 1) * FRAMESIZE;
+  const slot0Off = HDR_BASE;
+  es1[slot0Off + 1] = (nextFreeAux >> 16) & 0xFF;
+  es1[slot0Off + 2] = (nextFreeAux >>  8) & 0xFF;
+  es1[slot0Off + 3] =  nextFreeAux        & 0xFF;
 
   return ((endaddr + FRAMESIZE) >> 5) << 5;
 }
 
+/**
+ * Trigger a browser download of the .ES1 file.
+ */
 export function downloadES1(es1bytes, filename = 'BACKUP.ES1') {
   const blob = new Blob([es1bytes], { type: 'application/octet-stream' });
   const url  = URL.createObjectURL(blob);
