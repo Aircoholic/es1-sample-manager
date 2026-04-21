@@ -241,10 +241,12 @@ export function writeSlot(es1, slotNo, samples32k, nextRamAddr, onProgress) {
   // Write primary ADPCM audio
   es1.set(adpcm, fileOff);
 
-  // Write aux block — 32 zero bytes is a safe placeholder
-  // (The aux block's exact purpose is unknown, but zero-fill seems accepted.)
-  // If this fails, try: es1.set(adpcm.subarray(0, FRAMESIZE), auxFile);  // copy of first block
-  es1.fill(0x00, auxFile, auxFile + FRAMESIZE);
+  // Write aux block — copy of the first primary ADPCM block.
+  // The aux block's exact purpose is undocumented, but hardware backups always
+  // have non-zero aux data. Empirically, zero-fill resulted in samples being
+  // recognized but silent. Copying the first primary block gives the aux a
+  // valid ADPCM structure that matches the sample's own audio content.
+  es1.set(adpcm.subarray(0, FRAMESIZE), auxFile);
 
   // Write slot descriptor
   const hoff = HDR_BASE + slotNo * MHDR_SIZE;
