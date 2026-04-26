@@ -2,38 +2,35 @@
  * es1Encoder.js — Korg ES-1 ADPCM Encoder & .ES1 Backup Writer
  *
  * ADPCM core ported from Korg's es2wav.exe via polluxsynth/es12wav (adpcm.c).
- * Slot-record format determined empirically from:
- *   - 6 official Korg factory backups (Sound Designer Collection)
- *   - Reference hardware backups from real Korg ES-1 devices
- *   - Verified by matching extracted .wav lengths to slot length fields
  *
  * VERIFIED SLOT RECORD FORMAT (26 bytes per mono slot):
  *   [0-3]   reserved 0x00
- *   [4-6]   STADDR  — audio start address (3-byte BE, stored-addr space)
- *   [7-9]   ENDADDR — audio end address (inclusive)
- *   [10-12] RANGE_B_START — secondary range (mirror of Range A as placeholder)
- *   [13-15] RANGE_B_END
+ *   [4-6]   STADDR_A — Range A start (24-bit BE, addr space −0x160000)
+ *   [7-9]   ENDADDR_A — Range A end (inclusive, exact sample count)
+ *   [10-12] STADDR_B — Range B start (24-bit BE, addr space −0x060000)
+ *   [13-15] ENDADDR_B — Range B end (inclusive, 32-byte aligned)
  *   [16-18] reserved 0x00
- *   [19-21] LENGTH-1 as 24-bit BIG-ENDIAN ← THE CRITICAL FIELD
+ *   [19-21] LENGTH-1 as 24-bit BE — exact sample count minus 1
  *   [22-24] reserved 0x00
  *   [25]    SLOT_INDEX — slot_number for occupied; 0xFF for empty
  *
- * KEY DISCOVERY (April 2026): the byte at [21] is NOT a status flag.
- * It's the LOW byte of a 24-bit length field at [19-21] BE.
- * Previous versions wrote 0x1F there ("STATUS=occupied"), making the device
- * read length = 31 → playback truncated to 1ms → silence.
+ * KEY DISCOVERY (April 2026): Range B is the actual playback source.
+ *   - Range B uses addressing offset −0x060000 (NOT −0x160000 like Range A)
+ *   - For audio at file offset X: Range B stored addr = X + 0x060000
+ *   - For slot 0 starting at file 0x0a0000: Range B = 0x100000 (NOT 0x200000)
+ *   - Both ranges can point to the same file location via different
+ *     stored-address spaces (the ES-1 has two memory mappings)
  *
- * Verified across all 6 official Korg backups (Sound Designer Collection):
- *   - 4.es1 slot 02 (BD02): length field 6485 = WAV length 6485 ✓
- *   - 4.es1 slot 31: length field 141871 (24-bit, byte[19]=0x02)
- *   - All occupied slots: byte[25] is non-0xFF; empty slots: byte[25] = 0xFF
+ * Verified by decoding Range B from Korg 4.es1 slot 2:
+ *   Range B at 0x100000 + offset → file 0x0b9b20
+ *   Decoded first 8 samples: [0, 10, 2, 13, 4, 13, 8, 17]
+ *   Extracted 02.wav from 4.es1: [0, 10, 2, 13, 4, 13, 8, 17] ✓ exact match
  *
  * FILE LAYOUT:
  *   File size  : 3 801 088 bytes (29 × 2^17)
  *   HDR1 at 0x000000, HDR2 at 0x080000
  *   Slot table : 0x080010, 100 mono × 26 + 50 stereo × 28 bytes
  *   Audio zone : 0x0A0000 – 0x39FFFF (file offsets)
- *   Stored addr: file_offset = stored_addr − 0x160000
  *   Pattern area (0x000100–0x07FFFF) must be 0x00, NOT 0xFF.
  *   BPM byte at 0x100 — hardware displays value × 2 (so store 60 for 120 BPM).
  */
@@ -67,10 +64,9 @@ const STEP_TABLE = [
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
-export const ES1_SIZE    = 3_801_088;
-export const ES1_SR      = 32_000;
-export const FRAMESIZE   = 32;
-export const RAM_START   = 0x200000;
+export const ES1_SIZE  = 3_801_088;
+export const ES1_SR    = 32_000;
+export const FRAMESIZE = 32;
 
 const HEADERPOS    = 0x080000;
 const HDR_BASE     = 0x080010;
@@ -78,14 +74,24 @@ const MHDR_SIZE    = 26;
 const SHDR_SIZE    = 28;
 const MONO_SLOTS   = 100;
 const STEREO_SLOTS = 50;
-const ADDR_OFFSET  = 0x160000;
 
-const EMPTY_INDEX = 0xFF;       // empty-slot marker at byte [25]
+const AUDIO_ZONE_START = 0x0A0000;   // file offset where audio data begins
+const AUDIO_ZONE_END   = 0x3A0000;   // file offset (exclusive)
+
+// Range A virtual addr space:  stored = file_offset + 0x160000
+// Range B virtual addr space:  stored = file_offset + 0x060000
+const RANGE_A_OFFSET = 0x160000;
+const RANGE_B_OFFSET = 0x060000;
+
+// Public: the starting Range A address callers should pass for the first slot
+export const RAM_START = AUDIO_ZONE_START + RANGE_A_OFFSET;  // 0x200000
+
+const EMPTY_INDEX = 0xFF;
 
 const HDR1 = [0x4B,0x4F,0x52,0x47,0x01,0x00,0x57,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0xBB,0xB3];
 const HDR2 = [0x4B,0x4F,0x52,0x47,0x01,0x00,0x57,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xAF,0x3E];
 
-// ─── ADPCM CORE ───────────────────────────────────────────────────────────────
+// ─── ADPCM ENCODER ────────────────────────────────────────────────────────────
 
 function stepsizeToIndex(s, tn) {
   const t = STEP_TABLE[tn];
@@ -178,7 +184,7 @@ export function createEmptyES1() {
   HDR2.forEach((b, i) => { data[HEADERPOS + i] = b; });
 
   // Audio zone = 0xFF (erased NOR flash)
-  data.fill(0xFF, 0x0A0000, 0x3A0000);
+  data.fill(0xFF, AUDIO_ZONE_START, AUDIO_ZONE_END);
 
   // Default BPM = 60 raw → hardware displays 60 × 2 = 120 BPM
   data[0x100] = 60;
@@ -194,96 +200,104 @@ export function createEmptyES1() {
 /**
  * Encode a mono 32 kHz Float32Array into a slot.
  *
- * Writes:
- *   - ADPCM audio at the address pointed to by [4-9]
- *   - Slot descriptor with 24-bit length-1 at [19-21]
- *   - Slot index at [25] = slot_number
- *   - Range B [10-15] mirrors Range A as a safe non-zero placeholder
- *
  * @param {Uint8Array}   es1           Image to modify in-place
  * @param {number}       slotNo        0–99 (mono slot)
  * @param {Float32Array} samples32k    Mono Float32 [-1..1] at 32 kHz
- * @param {number}       nextRamAddr   Start: RAM_START (0x200000)
+ * @param {number}       nextRamAddr   Range A virtual address for this slot.
+ *                                     Pass RAM_START (0x200000) for the first
+ *                                     slot; use the return value for subsequent
+ *                                     slots.
  * @param {function}     [onProgress]  (framesDone, framesTotal)
- * @returns {number} Updated nextRamAddr, 32-byte aligned
+ * @returns {number} Updated nextRamAddr (Range A virtual addr, 32-byte aligned)
  */
 export function writeSlot(es1, slotNo, samples32k, nextRamAddr, onProgress) {
   if (slotNo < 0 || slotNo >= MONO_SLOTS)
     throw new RangeError(`Slot ${slotNo} out of range (0–${MONO_SLOTS - 1})`);
 
   // Float32 → Int16
-  const pcm16 = new Int16Array(samples32k.length);
-  for (let i = 0; i < samples32k.length; i++)
+  const nSamples = samples32k.length;
+  const pcm16 = new Int16Array(nSamples);
+  for (let i = 0; i < nSamples; i++)
     pcm16[i] = Math.max(-32767, Math.min(32767, Math.round(samples32k[i] * 32767)));
 
-  // Encode ADPCM blocks (1 byte per audio sample, 32 samples per block)
-  const nFrames = Math.ceil(pcm16.length / FRAMESIZE);
-  const adpcm   = new Uint8Array(nFrames * FRAMESIZE);
-  const buf     = new Int16Array(FRAMESIZE);
+  // Encode ADPCM blocks (1 block = 32 input samples → 32 bytes)
+  const nFrames    = Math.ceil(nSamples / FRAMESIZE);
+  const paddedLen  = nFrames * FRAMESIZE;        // ADPCM byte count (32-aligned)
+  const adpcm      = new Uint8Array(paddedLen);
+  const buf        = new Int16Array(FRAMESIZE);
 
   for (let fn = 0; fn < nFrames; fn++) {
     for (let i = 0; i < FRAMESIZE; i++)
-      buf[i] = (fn * FRAMESIZE + i < pcm16.length) ? pcm16[fn * FRAMESIZE + i] : 0;
+      buf[i] = (fn * FRAMESIZE + i < nSamples) ? pcm16[fn * FRAMESIZE + i] : 0;
     adpcm.set(encodeFrame(buf), fn * FRAMESIZE);
     if (onProgress && (fn & 63) === 0) onProgress(fn, nFrames);
   }
   onProgress?.(nFrames, nFrames);
 
-  // 1 byte = 1 sample for ES-1 ADPCM
-  const nSamples = adpcm.length;
-  const staddr   = nextRamAddr;
-  const endaddr  = staddr + nSamples - 1;
-  const fileOff  = staddr - ADDR_OFFSET;
+  // ─── Address arithmetic ────────────────────────────────────────────────────
+  //
+  // The audio data is written ONCE at file offset `fileOff` (computed from the
+  // caller-supplied Range A virtual address). Both Range A and Range B point to
+  // the same file location via two different virtual address spaces:
+  //
+  //   Range A virtual addr = file_offset + 0x160000
+  //   Range B virtual addr = file_offset + 0x060000
+  //
+  const staddrA = nextRamAddr;
+  const fileOff = staddrA - RANGE_A_OFFSET;
+  const staddrB = fileOff + RANGE_B_OFFSET;
 
-  if (fileOff < 0 || fileOff + nSamples > ES1_SIZE)
+  // Range A end uses the EXACT sample count (Korg's convention)
+  const endaddrA = staddrA + nSamples - 1;
+  // Range B end uses the PADDED byte count (32-byte aligned)
+  const endaddrB = staddrB + paddedLen - 1;
+
+  if (fileOff < AUDIO_ZONE_START || fileOff + paddedLen > AUDIO_ZONE_END)
     throw new Error(`Slot ${slotNo}: audio zone full`);
 
-  // Write the ADPCM audio data
+  // Write the ADPCM audio data once
   es1.set(adpcm, fileOff);
 
-  // Write the slot descriptor
+  // ─── Slot descriptor ───────────────────────────────────────────────────────
   const hoff = HDR_BASE + slotNo * MHDR_SIZE;
 
-  // [4-6] STADDR
-  es1[hoff + 4] = (staddr >> 16) & 0xFF;
-  es1[hoff + 5] = (staddr >>  8) & 0xFF;
-  es1[hoff + 6] =  staddr        & 0xFF;
+  // [0-3] reserved (already 0)
 
-  // [7-9] ENDADDR (inclusive)
-  es1[hoff + 7] = (endaddr >> 16) & 0xFF;
-  es1[hoff + 8] = (endaddr >>  8) & 0xFF;
-  es1[hoff + 9] =  endaddr        & 0xFF;
+  // [4-6] STADDR_A (Range A start)
+  es1[hoff + 4] = (staddrA >> 16) & 0xFF;
+  es1[hoff + 5] = (staddrA >>  8) & 0xFF;
+  es1[hoff + 6] =  staddrA        & 0xFF;
 
-  // [10-15] Range B — mirror to Range A as safe non-zero placeholder
-  es1[hoff + 10] = es1[hoff + 4];
-  es1[hoff + 11] = es1[hoff + 5];
-  es1[hoff + 12] = es1[hoff + 6];
-  es1[hoff + 13] = es1[hoff + 7];
-  es1[hoff + 14] = es1[hoff + 8];
-  es1[hoff + 15] = es1[hoff + 9];
+  // [7-9] ENDADDR_A (Range A end, inclusive — exact sample count)
+  es1[hoff + 7] = (endaddrA >> 16) & 0xFF;
+  es1[hoff + 8] = (endaddrA >>  8) & 0xFF;
+  es1[hoff + 9] =  endaddrA        & 0xFF;
 
-  // [16-18] reserved (already 0 from createEmptyES1)
-  es1[hoff + 16] = 0;
-  es1[hoff + 17] = 0;
-  es1[hoff + 18] = 0;
+  // [10-12] STADDR_B (Range B start — DIFFERENT addr space than A)
+  es1[hoff + 10] = (staddrB >> 16) & 0xFF;
+  es1[hoff + 11] = (staddrB >>  8) & 0xFF;
+  es1[hoff + 12] =  staddrB        & 0xFF;
 
-  // [19-21] LENGTH-1 as 24-bit BIG-ENDIAN — THE CRITICAL FIELD
-  // Hardware reads this as the playback length in samples.
-  // Previously we wrote 0x1F at [21] as a "STATUS" byte → length = 31 → 1ms playback.
+  // [13-15] ENDADDR_B (Range B end, inclusive — 32-byte aligned)
+  es1[hoff + 13] = (endaddrB >> 16) & 0xFF;
+  es1[hoff + 14] = (endaddrB >>  8) & 0xFF;
+  es1[hoff + 15] =  endaddrB        & 0xFF;
+
+  // [16-18] reserved (already 0)
+
+  // [19-21] LENGTH-1 as 24-bit BE — exact sample count minus 1
   const lenMinus1 = nSamples - 1;
   es1[hoff + 19] = (lenMinus1 >> 16) & 0xFF;
   es1[hoff + 20] = (lenMinus1 >>  8) & 0xFF;
   es1[hoff + 21] =  lenMinus1        & 0xFF;
 
   // [22-24] reserved (already 0)
-  es1[hoff + 22] = 0;
-  es1[hoff + 23] = 0;
-  es1[hoff + 24] = 0;
 
-  // [25] slot index — Phase_1 hardware backup uses just slot_number (no offset)
+  // [25] slot index (factory-style: just the slot number)
   es1[hoff + 25] = slotNo & 0xFF;
 
-  return ((endaddr + FRAMESIZE) >> 5) << 5;
+  // Next slot's Range A address: just past this slot's padded ADPCM data
+  return staddrA + paddedLen;
 }
 
 /**
