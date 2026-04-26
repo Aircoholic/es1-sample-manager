@@ -14,24 +14,32 @@
  *   [22-24] reserved 0x00
  *   [25]    SLOT_INDEX — slot_number for occupied; 0xFF for empty
  *
- * KEY DISCOVERY (April 2026): Range B is the actual playback source.
- *   - Range B uses addressing offset −0x060000 (NOT −0x160000 like Range A)
- *   - For audio at file offset X: Range B stored addr = X + 0x060000
- *   - For slot 0 starting at file 0x0a0000: Range B = 0x100000 (NOT 0x200000)
- *   - Both ranges can point to the same file location via different
- *     stored-address spaces (the ES-1 has two memory mappings)
+ * KEY DISCOVERIES (April 2026):
  *
- * Verified by decoding Range B from Korg 4.es1 slot 2:
- *   Range B at 0x100000 + offset → file 0x0b9b20
- *   Decoded first 8 samples: [0, 10, 2, 13, 4, 13, 8, 17]
- *   Extracted 02.wav from 4.es1: [0, 10, 2, 13, 4, 13, 8, 17] ✓ exact match
+ * 1. RANGE B IS THE PLAYBACK SOURCE
+ *    - Range A virtual addr = file_offset + 0x160000
+ *    - Range B virtual addr = file_offset + 0x060000  ← different offset!
+ *    - For audio at file 0x0a0000: Range B = 0x100000 (NOT 0x200000)
+ *    - The ES-1 reads Range B for playback. Range A serves as a secondary
+ *      address space targeting the same physical audio data.
+ *    - Verified via Korg 4.es1 slot 2: Range B at 0x100000+offset → file
+ *      0x0b9b20 decodes to [0,10,2,13,4,13,8,17] — exact match with the
+ *      es2wav-extracted 02.wav.
+ *
+ * 2. PATTERN AREA MUST BE INITIALIZED
+ *    - Bytes 0x000100–0x07FFFF hold global+pattern data (BPM, parts, steps,
+ *      effects). Filling with 0x00 OR 0xFF makes the device load the file
+ *      but show "Off" in sample selection (samples not assigned to parts).
+ *    - 0xFF = all params at max → 511 BPM, all FX on, all steps on (broken).
+ *    - 0x00 = all params at zero → device shows "Off" for all parts.
+ *    - Solution: embed Korg 4.es1's pattern area as a known-good template
+ *      (524032 bytes, gzipped to ~1.9 KB).
  *
  * FILE LAYOUT:
  *   File size  : 3 801 088 bytes (29 × 2^17)
  *   HDR1 at 0x000000, HDR2 at 0x080000
  *   Slot table : 0x080010, 100 mono × 26 + 50 stereo × 28 bytes
  *   Audio zone : 0x0A0000 – 0x39FFFF (file offsets)
- *   Pattern area (0x000100–0x07FFFF) must be 0x00, NOT 0xFF.
  *   BPM byte at 0x100 — hardware displays value × 2 (so store 60 for 120 BPM).
  */
 
@@ -77,6 +85,8 @@ const STEREO_SLOTS = 50;
 
 const AUDIO_ZONE_START = 0x0A0000;   // file offset where audio data begins
 const AUDIO_ZONE_END   = 0x3A0000;   // file offset (exclusive)
+const PATTERN_START    = 0x000100;   // pattern/global data area
+const PATTERN_END      = 0x080000;   // up to (but not including) HDR2
 
 // Range A virtual addr space:  stored = file_offset + 0x160000
 // Range B virtual addr space:  stored = file_offset + 0x060000
@@ -90,6 +100,78 @@ const EMPTY_INDEX = 0xFF;
 
 const HDR1 = [0x4B,0x4F,0x52,0x47,0x01,0x00,0x57,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0xBB,0xB3];
 const HDR2 = [0x4B,0x4F,0x52,0x47,0x01,0x00,0x57,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xAF,0x3E];
+
+// ─── EMBEDDED PATTERN TEMPLATE ────────────────────────────────────────────────
+// Source: Korg Sound Designer Collection 4.es1 — bytes 0x000100–0x07FFFF.
+// This file ships only sample slots (no user patterns), so its global+pattern
+// region is essentially the Korg-provided "blank slate".
+// Compressed with gzip → 1938 bytes → 2584 chars base64.
+const PATTERN_TEMPLATE_B64 =
+  'H4sIACqd7mkC/+3XV0+TYQCG4Q9wgDjALQ7cKO6NilicbAq2qLjFH+ABRxgj/80fptU4ImcG45cH' +
+  'ruug6UHTJ3n7pnfb11R0FJXJomFgcZUrPr2rVIrOH4riyzIVf2ni+/5v/3t/tuT9FyXvnyl5f67k' +
+  '/Z6S97tK3u8ueb+15P3iP+//fN1yv7f7NOyXJg3TMA3TMA3TsFDNGqZhGqZhGqZhoVo0TMM0TMM0' +
+  'TMNCrdEwDdMwDdMwDQu1VsM0TMM0TMM0LNQ6DdMwDdMwDdOwUOs1TMM0TMM0TMNCtWqYhmmYhmmY' +
+  'hoVq0zAN0zAN0zANC7VBwzRMwzRMwzQsVLuGaZiGaZiGaViojRqmYRqmYRqmYaE2aZiGaZiGaZiG' +
+  'hdqsYRqmYRqmYRoWaouGaZiGaZiGaVioDg3TMA3TMA3TsFCdGqZhGqZhGqZhobZqmIZpmIZpmIaF' +
+  '2qZhGqZhGqZhGhZqu4ZpmIZpmIZpWKgdGqZhGqZhGqZhoXZqmIZpmIZpmIaF2qVhGqZhGqZhGhZq' +
+  't4ZpmIZpmIZpWKg9GqZhGqZhGqZhobo0TMM0TMM0TMNC7dUwDdMwDdMwDQu1T8M0TMM0TMM0LNR+' +
+  'DdMwDdMwDdOwUAc0TMM0TMM0TMNCdWuYhmmYhmmYhoU6qGEapmEapmEaFuqQhmmYhmmYhmlYqMMa' +
+  'pmEapmEapmGhjmiYhmmYhmmYhoU6qmEapmEapmEaFuqYhmmYhmmYhmlYqOMapmEapmEapmGhejRM' +
+  'wzRMwzRMw0Kd0DAN0zAN0zANC3VSwzRMwzRMwzQsVK+GaZiGaZiGaVioUxqmYRqmYRqmYaFOa5iG' +
+  'aZiGaZiGhTqjYRqmYRqmYRoW6qyGaZiGaZiGaViocxqmYRqmYRqmYaHOa5iGaZiGaZiGhbqgYRqm' +
+  'YRqmYRoW6qKGaZiGaZiGaVioSxqmYRqmYRqmYaEua5iGaZiGaZiGhbqiYRqmYRqmYRoW6qqGaZiG' +
+  'aZiGaVioaxqmYRqmYRqmYaH6NEzDNEzDNEzDQl3XMA3TMA3TMA0LdUPDNEzDNEzDNCzUTQ3TMA3T' +
+  'MA3TsFD9GqZhGqZhGqZhoW5pmIZpmIZpmIaFGtAwDdMwDdMwDQt1W8M0TMM0TMM0LFRFwzRMwzRM' +
+  'wzQs1KCGaZiGaZiGaVioOxqmYRqmYRqmYaHuapiGaZiGaZiGhbqnYRqmYRqmYRoW6r6GaZiGaZiG' +
+  'aVioBxqmYRqmYRqmYaEeapiGaZiGaZiGhRrSMA3TMA3TMA0LNaxhGqZhGqZhGhZqRMM0TMM0TMM0' +
+  'LNSohmmYhmmYhmlYqDEN0zAN0zAN07BQ4xqmYRqmYRqmYaEmNEzDNEzDNEzDQk1qmIZpmIZpmIaF' +
+  'qmqYhmmYhmmYhoWa0jAN0zAN0zANCzWtYRqmYRqmYRoW6pGGaZiGaZiGaViomoZpmIZpmIZpWKi6' +
+  'hmmYhmmYhmlYqBkN0zAN0zAN07BQjzVMwzRMwzRMw0I90TAN0zAN0zANC/VUwzRMwzRMwzQs1KyG' +
+  'aZiGaZiGaVioZxqmYRqmYRqmYaGea5iGaZiGaZiGhXqhYRqmYRqmYRoW6qWGaZiGaZiGaVioVxqm' +
+  'YRqmYRqmYaFea5iGaZiGaZiGhXqjYRqmYRqmYRoW6m3jM2zXMA3TMA3TMA0LNKdhGqZhGqZhGhbd' +
+  'sPLukIZpmIZpmIZpmIZpmIZpmIZpmIZpmIZpmIZpWELDmjWs0bAuDdMwDdMwDfM/LLNh77sqbRqm' +
+  'YRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqm' +
+  'YRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqm' +
+  'YRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqm' +
+  'YRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqmYRqm' +
+  'YRqmYRqmYRqmYUvUipbGu31Y+LBQsGr1Lm4rmgaHhoZGhofHG8bGRkdHRxpPJjb9wUmtZINF4xZ8' +
+  'flSr1WfqM42H2mS1Wp2amp6e/jQ/P//xG4e04vU7AtwC3IJ/9FseAAAAAAAAAAAAAAAAAAAAAAAA' +
+  'AAAAAAAAAAAAAAAAAAAAAACgTHUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
+  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
+  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
+  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
+  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgCW+AmnG5D4A/wcA';
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+function base64Decode(b64) {
+  // Browser-safe base64 → Uint8Array
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function inflateGzip(bytes) {
+  // DecompressionStream is supported in Chrome/Edge/Firefox/Safari (recent).
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+let _patternCache = null;
+async function getPatternTemplate() {
+  if (!_patternCache) {
+    const compressed = base64Decode(PATTERN_TEMPLATE_B64);
+    _patternCache = await inflateGzip(compressed);
+    if (_patternCache.length !== PATTERN_END - PATTERN_START) {
+      throw new Error(
+        `Pattern template size mismatch: got ${_patternCache.length}, ` +
+        `expected ${PATTERN_END - PATTERN_START}`
+      );
+    }
+  }
+  return _patternCache;
+}
 
 // ─── ADPCM ENCODER ────────────────────────────────────────────────────────────
 
@@ -176,23 +258,39 @@ function encodeFrame(samples) {
 
 /**
  * Create a blank .ES1 image with sane hardware defaults.
+ *
+ * Async because the embedded pattern template is gzipped and decompressed
+ * lazily via DecompressionStream (the inflated result is cached after the
+ * first call).
  */
-export function createEmptyES1() {
+export async function createEmptyES1() {
   const data = new Uint8Array(ES1_SIZE);   // zero-filled
 
+  // Embed the Korg-derived pattern/global template at 0x000100–0x07FFFF.
+  // Without this the device shows "Off" for all parts after import.
+  const template = await getPatternTemplate();
+  data.set(template, PATTERN_START);
+
+  // Magic headers
   HDR1.forEach((b, i) => { data[i] = b; });
   HDR2.forEach((b, i) => { data[HEADERPOS + i] = b; });
 
   // Audio zone = 0xFF (erased NOR flash)
   data.fill(0xFF, AUDIO_ZONE_START, AUDIO_ZONE_END);
 
-  // Default BPM = 60 raw → hardware displays 60 × 2 = 120 BPM
-  data[0x100] = 60;
-
-  // Empty-slot marker: byte [25] = 0xFF
+  // Empty-slot marker: byte [25] = 0xFF (the template's slot table is for
+  // 100 occupied slots, so we reset all slot records to "empty" first).
+  for (let s = 0; s < MONO_SLOTS; s++) {
+    const off = HDR_BASE + s * MHDR_SIZE;
+    for (let b = 0; b < MHDR_SIZE; b++) data[off + b] = 0;
+    data[off + 25] = EMPTY_INDEX;
+  }
   const monoEnd = HDR_BASE + MONO_SLOTS * MHDR_SIZE;
-  for (let s = 0; s < MONO_SLOTS;   s++) data[HDR_BASE + s * MHDR_SIZE + 25] = EMPTY_INDEX;
-  for (let s = 0; s < STEREO_SLOTS; s++) data[monoEnd  + s * SHDR_SIZE + 25] = EMPTY_INDEX;
+  for (let s = 0; s < STEREO_SLOTS; s++) {
+    const off = monoEnd + s * SHDR_SIZE;
+    for (let b = 0; b < SHDR_SIZE; b++) data[off + b] = 0;
+    data[off + 25] = EMPTY_INDEX;
+  }
 
   return data;
 }
@@ -235,19 +333,16 @@ export function writeSlot(es1, slotNo, samples32k, nextRamAddr, onProgress) {
   onProgress?.(nFrames, nFrames);
 
   // ─── Address arithmetic ────────────────────────────────────────────────────
-  //
-  // The audio data is written ONCE at file offset `fileOff` (computed from the
-  // caller-supplied Range A virtual address). Both Range A and Range B point to
-  // the same file location via two different virtual address spaces:
-  //
+  // Audio data is written ONCE at file offset `fileOff`. Both Range A and
+  // Range B point to the same file location via two different virtual address
+  // spaces:
   //   Range A virtual addr = file_offset + 0x160000
   //   Range B virtual addr = file_offset + 0x060000
-  //
   const staddrA = nextRamAddr;
   const fileOff = staddrA - RANGE_A_OFFSET;
   const staddrB = fileOff + RANGE_B_OFFSET;
 
-  // Range A end uses the EXACT sample count (Korg's convention)
+  // Range A end uses the EXACT sample count
   const endaddrA = staddrA + nSamples - 1;
   // Range B end uses the PADDED byte count (32-byte aligned)
   const endaddrB = staddrB + paddedLen - 1;
@@ -255,7 +350,6 @@ export function writeSlot(es1, slotNo, samples32k, nextRamAddr, onProgress) {
   if (fileOff < AUDIO_ZONE_START || fileOff + paddedLen > AUDIO_ZONE_END)
     throw new Error(`Slot ${slotNo}: audio zone full`);
 
-  // Write the ADPCM audio data once
   es1.set(adpcm, fileOff);
 
   // ─── Slot descriptor ───────────────────────────────────────────────────────
@@ -263,37 +357,43 @@ export function writeSlot(es1, slotNo, samples32k, nextRamAddr, onProgress) {
 
   // [0-3] reserved (already 0)
 
-  // [4-6] STADDR_A (Range A start)
+  // [4-6] STADDR_A
   es1[hoff + 4] = (staddrA >> 16) & 0xFF;
   es1[hoff + 5] = (staddrA >>  8) & 0xFF;
   es1[hoff + 6] =  staddrA        & 0xFF;
 
-  // [7-9] ENDADDR_A (Range A end, inclusive — exact sample count)
+  // [7-9] ENDADDR_A (exact sample count)
   es1[hoff + 7] = (endaddrA >> 16) & 0xFF;
   es1[hoff + 8] = (endaddrA >>  8) & 0xFF;
   es1[hoff + 9] =  endaddrA        & 0xFF;
 
-  // [10-12] STADDR_B (Range B start — DIFFERENT addr space than A)
+  // [10-12] STADDR_B (different addr space than A)
   es1[hoff + 10] = (staddrB >> 16) & 0xFF;
   es1[hoff + 11] = (staddrB >>  8) & 0xFF;
   es1[hoff + 12] =  staddrB        & 0xFF;
 
-  // [13-15] ENDADDR_B (Range B end, inclusive — 32-byte aligned)
+  // [13-15] ENDADDR_B (32-byte aligned)
   es1[hoff + 13] = (endaddrB >> 16) & 0xFF;
   es1[hoff + 14] = (endaddrB >>  8) & 0xFF;
   es1[hoff + 15] =  endaddrB        & 0xFF;
 
   // [16-18] reserved (already 0)
+  es1[hoff + 16] = 0;
+  es1[hoff + 17] = 0;
+  es1[hoff + 18] = 0;
 
-  // [19-21] LENGTH-1 as 24-bit BE — exact sample count minus 1
+  // [19-21] LENGTH-1 as 24-bit BE
   const lenMinus1 = nSamples - 1;
   es1[hoff + 19] = (lenMinus1 >> 16) & 0xFF;
   es1[hoff + 20] = (lenMinus1 >>  8) & 0xFF;
   es1[hoff + 21] =  lenMinus1        & 0xFF;
 
   // [22-24] reserved (already 0)
+  es1[hoff + 22] = 0;
+  es1[hoff + 23] = 0;
+  es1[hoff + 24] = 0;
 
-  // [25] slot index (factory-style: just the slot number)
+  // [25] slot index
   es1[hoff + 25] = slotNo & 0xFF;
 
   // Next slot's Range A address: just past this slot's padded ADPCM data

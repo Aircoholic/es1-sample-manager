@@ -73,7 +73,7 @@ export async function exportAndDownloadES1(onProgress) {
   }
   onProgress?.({ phase:'check', slot:0, total:active.length, pct:0, warning });
 
-  const es1    = createEmptyES1();
+  const es1    = await createEmptyES1();
   const total  = active.length;
   let ramAddr  = RAM_START;
   let written  = 0;
