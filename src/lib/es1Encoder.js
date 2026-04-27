@@ -396,6 +396,20 @@ export function writeSlot(es1, slotNo, samples32k, nextRamAddr, onProgress) {
   // [25] slot index
   es1[hoff + 25] = slotNo & 0xFF;
 
+  // ─── Global heap pointer ───────────────────────────────────────────────────
+  // Slot 0 bytes [1-3] = "next free address" in Range B address space.
+  // Verified across all 6 official Korg backups: this value always equals
+  // (max Range B end + 1) across all occupied slots. Without this pointer
+  // the device shows "Off" for every part — it imports the file but cannot
+  // assign samples, presumably because it thinks the heap is empty/corrupt.
+  //
+  // We update it on every writeSlot call. Since slots are written in order
+  // and Range B grows densely, the highest-end-B is always THIS slot's end.
+  const nextFreeB = endaddrB + 1;
+  es1[HDR_BASE + 1] = (nextFreeB >> 16) & 0xFF;
+  es1[HDR_BASE + 2] = (nextFreeB >>  8) & 0xFF;
+  es1[HDR_BASE + 3] =  nextFreeB        & 0xFF;
+
   // Next slot's Range A address: just past this slot's padded ADPCM data
   return staddrA + paddedLen;
 }
