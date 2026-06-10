@@ -3,7 +3,10 @@
   import { slots }                    from '../lib/slotStore.js';
   import { exportAsZip }              from '../lib/zipExporter.js';
   import { writeToDirectory }         from '../lib/fileSystemWriter.js';
-  import { exportAndDownloadES1 }     from '../lib/es1Exporter.js';
+  import { exportAndDownloadES1,
+           exportAllSplitES1 }        from '../lib/es1Exporter.js';
+  import { measureSlots, packBackups } from '../lib/es1Capacity.js';
+  import CapacityMeter                from './CapacityMeter.svelte';
 
   const hasFS    = 'showDirectoryPicker' in window;
   const isBrave  = typeof navigator.brave !== 'undefined';
@@ -16,8 +19,19 @@
   let progPct     = 0;
   let progText    = '';
   let showPrint   = false;
+  let showName    = false;
   let cardName    = '';
   let cardNotes   = '';
+  let exportName  = '';
+
+  // Turn a user-entered name into a safe filename stem (letters, digits, -, _).
+  function sanitizeName(name) {
+    const cleaned = (name || '').trim()
+      .replace(/[^\w\-]+/g, '_')   // non-word → underscore
+      .replace(/_+/g, '_')          // collapse repeats
+      .replace(/^_+|_+$/g, '');     // trim edges
+    return cleaned || 'BACKUP';
+  }
 
   function setMsg(text, isErr = false) {
     msg = text; msgErr = isErr;
@@ -32,13 +46,38 @@
     busy = false; showProg = false;
   }
 
-  function onProgress({ phase, slot, total, pct, warning: w }) {
+  function onProgress({ phase, slot, total, pct, warning: w, file, fileCount }) {
     if (w) warning = w;
     progPct = pct ?? progPct;
-    if (phase === 'check')    progText = 'Checking capacity…';
-    else if (phase === 'decode') progText = `Decoding ${slot} / ${total}…`;
-    else if (phase === 'encode') progText = `Encoding ${slot} / ${total} — ${pct} %`;
-    else if (phase === 'done')   progText = `${slot} sample${slot!==1?'s':''} written.`;
+    const fileTag = (fileCount && fileCount > 1) ? `File ${file}/${fileCount} · ` : '';
+    if (phase === 'check')         progText = 'Checking capacity…';
+    else if (phase === 'file-start') progText = `${fileTag}Starting…`;
+    else if (phase === 'decode')   progText = `${fileTag}Decoding ${slot} / ${total}…`;
+    else if (phase === 'encode')   progText = `${fileTag}Encoding ${slot} / ${total} — ${pct} %`;
+    else if (phase === 'download') progText = 'Saving…';
+    else if (phase === 'done')     progText = `${slot} sample${slot!==1?'s':''} written.`;
+  }
+
+  function openSplitDialog() {
+    const active = get(slots).filter(s => s?.blob instanceof Blob);
+    if (!active.length) { setMsg('No converted samples — convert first.', true); return; }
+    exportName = cardName || '';
+    showName = true;
+  }
+
+  async function handleES1Split() {
+    showName = false;
+    const base = sanitizeName(exportName);
+    startBusy('Preparing…');
+    try {
+      const { written, fileCount } = await exportAllSplitES1(onProgress, base);
+      setMsg(fileCount > 1
+        ? `${fileCount} backups downloaded (${written} samples total).`
+        : `${base}.ES1 downloaded (${written} sample${written!==1?'s':''}).`);
+    } catch (e) {
+      setMsg(e.message, true);
+    }
+    endBusy();
   }
 
   async function handleES1() {
@@ -83,23 +122,58 @@
     endBusy();
   }
 
-  function printList() {
-    const s = get(slots);
+  // Build the three-column table rows for one backup's slot labels.
+  function buildRows(labels) {
     const ROWS = 34;
-    const rows = Array.from({length:ROWS}, (_,i) => {
-      const cells = [0,1,2].map(col => {
-        const idx = i + col*ROWS;
-        return { n: String(idx).padStart(2,'0'), nm: s[idx]?.label ?? '' };
+    return Array.from({ length: ROWS }, (_, i) => {
+      const cells = [0, 1, 2].map(col => {
+        const idx = i + col * ROWS;
+        return { n: String(idx).padStart(2, '0'), nm: idx < labels.length ? labels[idx] : '' };
       });
-      return `<tr class="${i%2===0?'e':'o'}">${cells.map((c,ci)=>
-        `<td class="n${ci>0?' sep':''}">${c.n}</td><td class="nm">${c.nm}</td>`
+      return `<tr class="${i % 2 === 0 ? 'e' : 'o'}">${cells.map((c, ci) =>
+        `<td class="n${ci > 0 ? ' sep' : ''}">${escapeHtml(c.n)}</td><td class="nm">${escapeHtml(c.nm)}</td>`
       ).join('')}</tr>`;
     }).join('');
-    const date = new Date().toLocaleDateString('en-GB',{year:'numeric',month:'long',day:'numeric'});
-    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ES-1 · ${cardName||'Sample List'}</title>
+  }
+
+  function escapeHtml(str) {
+    return String(str ?? '').replace(/[&<>"]/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  async function printList() {
+    showPrint = false;
+    const list = get(slots);
+
+    // Use the SAME packing the .ES1 export uses, so the printed sheet matches
+    // exactly what lands on each backup.
+    const measured = await measureSlots(list);
+    const backups  = measured.length ? packBackups(measured) : [{ slots: [] }];
+    const multi    = backups.length > 1;
+
+    const date  = new Date().toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
+    const baseName = cardName || 'Unnamed Card';
+
+    const pages = backups.map((backup, bi) => {
+      const labels = backup.slots.map(m => m.label ?? '');
+      const rows   = buildRows(labels);
+      const title  = multi ? `${baseName} · ${bi + 1}/${backups.length}` : baseName;
+      const fileTag = multi
+        ? `<br>${escapeHtml(sanitizeName(cardName))}_${bi + 1}.ES1`
+        : '';
+      return `<div class="page">
+<header><div class="title">ES-1 · ${escapeHtml(title)}</div><div class="meta">Korg ES-1 · SmartMedia Sample List<br>${date}${fileTag}</div></header>
+<div class="wrap"><table><thead><tr><th class="n">#</th><th>Name</th><th class="n sep">#</th><th>Name</th><th class="n sep">#</th><th>Name</th></tr></thead>
+<tbody>${rows}</tbody></table></div>
+<footer><div><div class="nl">Notes</div><div class="nt">${escapeHtml(cardNotes)}</div></div><div class="gen">ES-1 Sample Manager</div></footer>
+</div>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ES-1 · ${escapeHtml(baseName)}</title>
 <style>@page{size:A5 landscape;margin:0}*{box-sizing:border-box;margin:0;padding:0}
-html,body{width:210mm;height:148mm;overflow:hidden;background:#fff;font-family:'Helvetica Neue',sans-serif;color:#111}
-.page{width:210mm;height:148mm;padding:6mm 8mm 5mm;display:flex;flex-direction:column}
+html,body{width:210mm;background:#fff;font-family:'Helvetica Neue',sans-serif;color:#111}
+.page{width:210mm;height:148mm;overflow:hidden;padding:6mm 8mm 5mm;display:flex;flex-direction:column;page-break-after:always}
+.page:last-child{page-break-after:auto}
 header{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:.4pt solid #aaa;padding-bottom:1.5mm;margin-bottom:2mm;flex-shrink:0}
 .title{font-size:10.5pt;font-weight:bold}.meta{font-size:5.5pt;color:#777;text-align:right;line-height:1.5}
 .wrap{flex:1;overflow:hidden}table{width:100%;border-collapse:collapse}
@@ -112,15 +186,9 @@ footer{flex-shrink:0;border-top:.4pt solid #ddd;padding-top:1.5mm;margin-top:1.5
 .nl{font-size:5pt;text-transform:uppercase;letter-spacing:.4px;color:#bbb;margin-bottom:.4mm}
 .nt{font-size:6pt;color:#444;line-height:1.4;white-space:pre-wrap;max-width:150mm}
 .gen{font-size:5pt;color:#ccc;text-align:right}
-</style></head><body><div class="page">
-<header><div class="title">ES-1 · ${cardName||'Unnamed Card'}</div><div class="meta">Korg ES-1 · SmartMedia Sample List<br>${date}</div></header>
-<div class="wrap"><table><thead><tr><th class="n">#</th><th>Name</th><th class="n sep">#</th><th>Name</th><th class="n sep">#</th><th>Name</th></tr></thead>
-<tbody>${rows}</tbody></table></div>
-<footer><div><div class="nl">Notes</div><div class="nt">${cardNotes}</div></div><div class="gen">ES-1 Sample Manager</div></footer>
-</div><script>window.onload=()=>window.print();<\/script></body></html>`;
-    const win = window.open('','_blank');
+</style></head><body>${pages}<script>window.onload=()=>window.print();<\/script></body></html>`;
+    const win = window.open('', '_blank');
     win.document.write(html); win.document.close();
-    showPrint = false;
   }
 
   $: hint = (isBrave && !hasFS)
@@ -131,15 +199,27 @@ footer{flex-shrink:0;border-top:.4pt solid #ddd;padding-top:1.5mm;margin-top:1.5
 <div class="bar">
   <div class="bar-hdr"><span class="section-label">EXPORT</span></div>
 
+  <CapacityMeter />
+
   <div class="btns">
     <button class="btn es1-btn" onclick={handleES1} disabled={busy}
-            title="Build .ES1 backup file (ADPCM encoded — copy to SmartMedia card)">
+            title="Build one .ES1 backup file (fills up to ~98 s of audio)">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round">
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
         <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
       </svg>
       Export .ES1
+    </button>
+
+    <button class="btn es1-split-btn" onclick={openSplitDialog} disabled={busy}
+            title="Export every sample, split across as many .ES1 backups as needed">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+        <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+      </svg>
+      Export All (split)
     </button>
 
     <button class="btn green-btn" onclick={()=>handleDir('card')}
@@ -253,6 +333,40 @@ footer{flex-shrink:0;border-top:.4pt solid #ddd;padding-top:1.5mm;margin-top:1.5
   </div>
 {/if}
 
+{#if showName}
+  <div class="backdrop" role="dialog" aria-modal="true" onclick={()=>showName=false}>
+    <div class="modal" onclick={(e)=>e.stopPropagation()}>
+      <div class="modal-hdr">
+        <h2 class="modal-title">Export All Samples</h2>
+        <button class="modal-x" onclick={()=>showName=false} aria-label="Close">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="1" y1="1" x2="13" y2="13"/><line x1="13" y1="1" x2="1" y2="13"/>
+          </svg>
+        </button>
+      </div>
+      <p class="modal-desc">Splits all converted samples across as many <em>.ES1</em> backups as needed (~98 s of audio each). Files are numbered <em>NAME_1.ES1</em>, <em>NAME_2.ES1</em>, … when more than one is required.</p>
+      <div class="fields">
+        <div class="field">
+          <label class="flabel" for="exn">Backup name</label>
+          <input id="exn" class="finput" type="text" bind:value={exportName}
+                 placeholder="e.g. Drums Vol 1" autofocus autocomplete="off"
+                 onkeydown={(e)=>{if(e.key==='Enter')handleES1Split();}}/>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="mbtn mcancel" onclick={()=>showName=false}>Cancel</button>
+        <button class="mbtn mconfirm" onclick={handleES1Split}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+          </svg>
+          Export
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   .bar {
     margin-top: var(--sp8);
@@ -294,6 +408,19 @@ footer{flex-shrink:0;border-top:.4pt solid #ddd;padding-top:1.5mm;margin-top:1.5
   .es1-btn:hover:not(:disabled) {
     background: #f08820;
     border-color: #f08820;
+    transform: translateY(-1px);
+  }
+
+  /* .ES1 split — amber outline, secondary to the primary export */
+  .es1-split-btn {
+    background: rgba(224,122,26,0.10);
+    color: var(--a);
+    border-color: rgba(224,122,26,0.45);
+    font-weight: 600;
+  }
+  .es1-split-btn:hover:not(:disabled) {
+    background: rgba(224,122,26,0.18);
+    border-color: var(--a);
     transform: translateY(-1px);
   }
 
